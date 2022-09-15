@@ -1,0 +1,864 @@
+---
+title: "DIAPER_all"
+author: "Min-Ting"
+date: '2022-07-28'
+output: html_document
+---
+#Save the entire list of environments objects
+```{r}
+# save
+save.image(file = "DIAPER_all.RData")
+dir("/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all")
+
+#load environment
+load("/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/DIAPER_all.RData")
+```
+
+# =========================================
+# Load packages
+# =========================================
+```{r}
+library(genefilter)
+library(ggpubr)
+library(UpSetR)
+library(randomcoloR)
+library(circlize)
+library(RColorBrewer)
+library(qiime2R)
+library(tidyverse)
+library(phyloseq)
+library(DESeq2)
+library(ggplot2)
+library(ComplexHeatmap)
+library(curatedMetagenomicData)
+library(ggsci)
+library(Polychrome)
+library(OTUtable)
+library(vegan)
+library(rmcorr)
+library(languageR)
+library(colordistance)
+library(ggrepel)
+library(factoextra) # for dendogram
+
+```
+
+
+##=========================================================
+# Create funciton for converting Metaphlan file to phyloseq
+##=========================================================
+```{r}
+## make function based on
+# https://www.biostars.org/p/449688/
+metaphlanToPhyloseq <- function(
+  tax,
+  metadat=NULL,
+  simplenames=TRUE,
+  roundtointeger=FALSE,
+  split="|"){
+  ## tax is a matrix or data.frame with the table of taxonomic abundances, rows are taxa, columns are samples
+  ## metadat is an optional data.frame of specimen metadata, rows are samples, columns are variables
+  ## if simplenames=TRUE, use only the most detailed level of taxa names in the final object
+  ## if roundtointeger=TRUE, values will be rounded to the nearest integer
+  xnames = rownames(tax)
+  shortnames = gsub(paste0(".+\\", split), "", xnames)
+  if(simplenames){
+    rownames(tax) = shortnames
+  }
+  if(roundtointeger){
+    tax = round(tax * 1e4)
+  }
+  x2 = strsplit(xnames, split=split, fixed=TRUE)
+  taxmat = matrix(NA, ncol=max(sapply(x2, length)), nrow=length(x2))
+  colnames(taxmat) = c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species", "Strain")[1:ncol(taxmat)]
+  rownames(taxmat) = rownames(tax)
+  for (i in 1:nrow(taxmat)){
+    taxmat[i, 1:length(x2[[i]])] <- x2[[i]]
+  }
+  taxmat = gsub("[a-z]__", "", taxmat)
+  taxmat = phyloseq::tax_table(taxmat)
+  otutab = phyloseq::otu_table(tax, taxa_are_rows=TRUE)
+  if(is.null(metadat)){
+    res = phyloseq::phyloseq(taxmat, otutab)
+  }else{
+    res = phyloseq::phyloseq(taxmat, otutab, phyloseq::sample_data(metadat))
+  }
+  return(res)
+}
+```
+
+# =========================================
+# 2022.09.09- Metaphlan4.0: BS4,5,7,8,10
+# =========================================
+```{r}
+mpa4 <- read_csv("/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/metaphlan4_BS457810_merged.abund_09.07.22.csv")
+```
+
+##=========================================================
+# Metaphlan convert to phyloseq
+# Metaphlan 4.0- BS4,5,7,8,10
+##=========================================================
+```{r}
+mpa4.ps <- mpa4 %>%
+  column_to_rownames(var = "taxonomy") # move taxonomy to rowname
+
+## convert mpa to phyloseq
+ps3 = metaphlanToPhyloseq(mpa4.ps, metadat = sample3)
+
+```
+
+
+##=========================================================
+# Stacked bar- Phylum
+# Metaphlan 4.0- BS4,5,7,8,10
+##=========================================================
+```{r}
+## phylum-- ignore NA
+ps3_phylum_nona <- ps3 %>%
+  tax_glom(taxrank =  "Phylum",
+           NArm = TRUE) %>%
+  transform_sample_counts(function(x) {x/sum(x)}) %>%
+  psmelt()
+
+
+
+# how many phylum?
+ps3_phylum_nona %>%
+  group_by(Phylum) %>%
+  summarise(n = n()) # 6
+
+
+nb.6.colorblind <- c("#56B4E9", "#CC79A7",
+          "#F0E442", "#0072B2", "#009E73","#999999")
+
+
+
+# plot, no NA
+ps3_phylum_nona %>%
+  #left_join(meta_df, by = "SampleID") %>%
+  ggplot(aes(x = SampleID, y = Abundance, fill = Phylum)) +
+  geom_bar(stat = "identity",
+           position = "fill"
+           ) +
+  scale_fill_manual(values = nb.6.colorblind) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45,
+                                   vjust = 1,
+                                   hjust = 1),
+        text = element_text(size=8)) +
+  facet_wrap(.~Baby_id, scales = "free")
+
+ggsave(path = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/Rplot",filename = "mpa40_stackBar_phylum_nona.pdf", height=5, width=8, device="pdf")
+
+
+```
+
+
+##=========================================================
+# Stacked bar- Genus
+# Metaphlan 4.0- BS4,5,7,8,10
+##=========================================================
+```{r}
+# prune out phyla below 1% in each sample
+
+ps3_genus_nona <- ps3 %>%
+  tax_glom(taxrank =  "Genus",
+           NArm = TRUE) %>%
+  transform_sample_counts(function(x) {x/sum(x)}) %>%
+  psmelt() %>%
+  filter(Abundance > 0.01) %>%
+  # Filter out low abundance taxa
+  arrange(Genus)   # Sort data frame alphabetically by species
+
+
+# how many species?
+ps3_genus_nona %>%
+  group_by(Genus) %>%
+  summarise(n = n()) # 27
+
+#get colors
+nb.27.col <- distinctColorPalette(27)
+#nb.41.col2 <- colorRampPalette((brewer.pal(8,"Set1")))(41)
+
+# plot
+ps3_genus_nona %>%
+  ggplot(aes(x = SampleID, y = Abundance, fill = Genus)) +
+  geom_bar(stat = "identity",
+           position = "fill",
+           #color = "grey25",
+           ) +
+  scale_fill_manual(values = nb.27.col) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45,
+                                   vjust = 1,
+                                   hjust = 1),
+        text = element_text(size=8)) +
+  facet_wrap(.~Baby_id, scales = "free")
+
+ggsave(path = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/Rplot",filename = "mpa40_stackBar_genus_nona_20220728.pdf", height=5, width=12, device="pdf")
+```
+
+##=========================================================
+# Stacked bar- Species
+# Metaphlan 4.0- BS4,5,7,8,10
+##=========================================================
+```{r}
+# prune out phyla below 1% in each sample
+
+ps3_species_nona <- ps3 %>%
+  tax_glom(taxrank =  "Species",
+           NArm = TRUE) %>%
+  transform_sample_counts(function(x) {x/sum(x)}) %>%
+  psmelt() %>%
+  filter(Abundance > 0.01) %>%
+  # Filter out low abundance taxa
+  arrange(Species)   # Sort data frame alphabetically by species
+
+
+# how many species?
+ps3_species_nona %>%
+  group_by(Species) %>%
+  summarise(n = n()) # 64
+
+#get colors
+nb.64.col <- distinctColorPalette(64)
+#nb.41.col2 <- colorRampPalette((brewer.pal(8,"Set1")))(41)
+
+# plot
+ps3_species_nona %>%
+  #left_join(meta_df, by = "SampleID") %>%
+  ggplot(aes(x = SampleID, y = Abundance, fill = Species)) +
+  geom_bar(stat = "identity",
+           position = "fill",
+           #color = "grey25",
+           ) +
+  scale_fill_manual(values = nb.64.col) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45,
+                                   vjust = 1,
+                                   hjust = 1),
+        text = element_text(size=8)) +
+  facet_wrap(.~Baby_id, scales = "free")
+
+ggsave(path = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/Rplot",filename = "mpa40_stackBar_species_nona.pdf", height=6, width=15, device="pdf")
+```
+
+
+## ***********************************
+# Cholesterol sulfate and Bacteroides
+# 2022.07.29 BS3,4,5,7
+## ***********************************
+```{r}
+# import data
+
+cholsulf_bac <- read_csv("/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/DIAPER_CSvBacteroides_20220729update.csv")
+
+# plot all three
+cholsulf_bac %>%
+  left_join(meta_df[,c(1,2)]) %>%
+  ggplot(aes(x = Bacteroides_rel, y = CholSulf_uM)) +
+  geom_smooth(method = "lm", 
+              se = TRUE, color = "black") +
+  geom_point(aes(color = Baby_id),
+             size = 3,
+             alpha = 0.6) + 
+  scale_color_brewer(palette = "Set1") +
+  guides(fill = guide_legend(override.aes = list(shape=21))) + 
+  geom_segment(aes(xend = Bacteroides_rel, 
+                   yend = CholSulf_uM), alpha=.2)+
+  theme_bw()  # Add theme for cleaner look
+
+ggsave(path = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/Rplot",filename = "BacteroidesVScholsulf.pdf", height=4, width=5, device="pdf")
+  
+  cholsulf_bac %>%
+  left_join(meta_df[,c(1,2)]) %>%
+  ggscatter(
+          x = "Bacteroides_rel", y = "CholSulf_uM",
+          #color = "Baby_id",
+          #palette = "Set1",
+          add = "reg.line", conf.int = TRUE,
+          cor.coef = TRUE, cor.method = "spearman",
+          xlab = "cholesterol sulfate (uM per dry mg)",
+          ylab = "Bacteroides (% rel ab)")
+  
+  
+## exclude BS7
+  cholsulf_bac %>%
+  left_join(meta_df[,c(1,2)]) %>%
+    filter(!Baby_id =="BS7") %>%
+  ggplot(aes(x = Bacteroides_rel, y = CholSulf_uM)) +
+  geom_smooth(method = "lm", 
+              se = TRUE, color = "black") +
+  geom_point(aes(color = Baby_id),
+             size = 3,
+             alpha = 0.6) + 
+  scale_color_brewer(palette = "Set1") +
+  guides(fill = guide_legend(override.aes = list(shape=21))) + 
+  geom_segment(aes(xend = Bacteroides_rel, 
+                   yend = CholSulf_uM), alpha=.2)+
+  theme_bw()  # Add theme for cleaner look
+  
+  ggsave(path = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/Rplot",filename = "BacteroidesVScholsulf_sub.pdf", height=4, width=5, device="pdf")
+  
+ 
+```
+
+# test rmcorr: Repeated Measurement Correlation
+```{r}
+cholsulf_bac.rmcor <- rmcorr(participant = Baby_id,
+       measure1 = CholSulf_uM,
+       measure2 = Bacteroides_rel,
+       dataset = cholsulf_bac2)
+
+# for graphing:: get the rmcorr coefficient (rounded) and p-value (using pvals.fct)
+
+cholsulf_bac.rmcor_r <- sprintf("%.2f", round(cholsulf_bac.rmcor$r, 2))
+
+cholsulf_bac.rmcor_p <- pvals.fnc(cholsulf_bac.rmcor$p)
+pvals.fnc()
+
+plot(cholsulf_bac.rmcor, 
+     xlab = "Cholesterol sulfate (uM per mg dry stool",
+     ylab = "Bacteroides (%)",
+     overall = F, 
+     #palette = mypal, 
+     las = 1)
+
+###
+
+cholsulf_bac2 %>%
+  ggscatter(x = "Bacteroides_rel",
+            y = "CholSulf_uM",
+            add = "reg.line",
+            color = "Baby_id",
+            size = 3,
+            alpha = 0.6) +
+  scale_color_brewer(palette = "Set1") +
+  theme_bw()
+
+
+ggsave(path = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/Rplot",filename = "BacteroidesVScholsulf_rmcorr.pdf", height=4, width=5, device="pdf")
+
+
+```
+
+## ***********************************
+# Cholesterol sulfate and Milk cholesterol 
+# 2022.08.17 BS 5, 7
+## ***********************************
+```{r}
+# import data
+
+cholsulf_bac_Chol <- read_csv("/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/DIAPER_CSvBACvChol_20220816update.csv")
+
+# check color code
+brewer.pal(3, "Set1")
+
+# plot BS5 and BS7
+cholsulf_bac_Chol[,c(1,2,4)] %>%
+  left_join(meta_df[,c(1,2)]) %>%
+  filter(!Baby_id == "BS4") %>%
+  ggplot(aes(x = HM_chol_uM, y = CholSulf_uM)) +
+  geom_smooth(method = "lm", 
+              se = TRUE, color = "black") +
+  geom_point(aes(color = Baby_id),
+             size = 3,
+             alpha = 0.6) + 
+  scale_color_manual(values = c("#377EB8","#4DAF4A")) +
+  guides(fill = guide_legend(override.aes = list(shape=21))) + 
+  geom_segment(aes(xend = HM_chol_uM, 
+                   yend = CholSulf_uM), alpha=.2)+
+  theme_bw()  # Add theme for cleaner look
+
+ggsave(path = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/Rplot",filename = "cholsulfVSchol.pdf", height=4, width=5, device="pdf")
+  
+cholsulf_bac_Chol[,c(1,2,4)] %>%
+  left_join(meta_df[,c(1,2)]) %>%
+  filter(!Baby_id == "BS4") %>%
+  ggscatter(
+          x = "HM_chol_uM", y = "CholSulf_uM",
+          #color = "Baby_id",
+          #palette = "Set1",
+          add = "reg.line", conf.int = TRUE,
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "Milk cholesterol (uM)",
+          ylab = "cholesterol sulfate (uM per dry mg)")
+  
+  
+
+ 
+```
+
+# test rmcorr: Repeated Measurement Correlation
+```{r}
+
+cholsulf_bac_Chol2 <- cholsulf_bac_Chol %>%
+  left_join(meta_df[,c(1,2)])
+
+cholsulf_bac_Chol.rmcor <- rmcorr(participant = Baby_id,
+       measure1 = CholSulf_uM,
+       measure2 = HM_chol_uM,
+       dataset = cholsulf_bac_Chol2)
+
+# for graphing:: get the rmcorr coefficient (rounded) and p-value (using pvals.fct)
+
+cholsulf_bac_Chol.rmcor_r <- sprintf("%.2f", round(cholsulf_bac_Chol.rmcor$r, 2))
+
+cholsulf_bac_Chol.rmcor_p <- pvals.fnc(cholsulf_bac_Chol.rmcor$p)
+pvals.fnc()
+
+plot(cholsulf_bac_Chol.rmcor, 
+     xlab = "Cholesterol sulfate (uM per mg dry stool",
+     ylab = "Human milk cholesterol (uM)",
+     overall = F, 
+     #palette = mypal, 
+     las = 1)
+
+###
+
+cholsulf_bac_Chol2 %>%
+  filter(!Baby_id == "BS4") %>%
+  ggscatter(x = "HM_chol_uM",
+            y = "CholSulf_uM",
+            add = "reg.line",
+            color = "Baby_id",
+            size = 3,
+            alpha = 0.6) +
+  scale_color_manual(values = c("#377EB8","#4DAF4A")) +
+  theme_bw()
+
+
+ggsave(path = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/Rplot",filename = "cholsulf.VS.chol_rmcorr.pdf", height=4, width=5, device="pdf")
+
+
+```
+
+
+##=========================================================
+# Temporal stool color
+# update: 08.18.22
+##=========================================================
+```{r}
+# import sheet- 08.18.22
+stool_col <- read_csv("/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/stool_color_model.v.report_20220818organize.csv")
+
+## filter to have those have been seqeunced
+stool_col_filter <- stool_col %>%
+  filter(!Baby_id == "BS9") %>%
+  filter(!Baby_id == "BS11") %>%
+  filter(!Baby_id == "BS14") %>%
+  filter(!Baby_id == "BS15")
+
+## check how many different colors
+stool_col_filter %>%
+  group_by(color_model) %>%
+  summarise(color = n()) # 17
+
+stool_col_filter %>%
+  group_by(color_report) %>%
+  summarise(color = n()) # 17
+
+## create color palette
+
+col_stool <- c(
+  "Dark Brown" = "#392803",
+"Brown" = "#5F4119",
+"Rust Brown" = "#7d4b19",
+"Peanut Butter Brown" = "#cd9141", #(not on the sheet)
+"Yellow Brown" = "#986505",
+"Light Brown" = "#785414",
+"Greenish Brown" = "#765f14",
+"Greenish Tan" = "#856f0c",
+"Mustard Yellow" = "#b58f2a",
+"Light Green"= "#7d841d",
+"Camo Green" = "#4b4b08",
+"Evergreen" = "#3c451f",
+"Dark Green" = "#243003",
+"Golden Yellow" = "#ffcc00",
+"Bright Yellow" = "#FFFF00",  #(not on the sheet)
+"Orange" = "#c37008",
+"Red Orange" = "#9a3e0f",
+"Red" = "#9e0b00",
+"Chalk Grey" = "#b4b3af"
+)
+
+## compare between model and report
+
+stool_col_filter[,c(1,3,4)] %>%
+  pivot_longer(-SampleID, names_to = "type",
+               values_to = "color") %>%
+  left_join(stool_col_filter[,c(1,5)]) %>%
+  filter(Baby_id == "BS10") %>%    ### change here
+  ggplot(aes(x = SampleID, y = color,
+              col = factor(color))) +
+   geom_point(size = 4)+
+  scale_color_manual(values = col_stool) +
+  facet_grid(rows = vars(type)) +
+  ggtitle(label = "BS10") +           ### change here
+  theme(axis.text.x = element_text(angle = 45,
+                                   vjust = 1,
+                                   hjust = 1),
+        text = element_text(size=9))
+
+ggsave(path = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/Rplot",filename = "stool_color_compare_BS10.pdf", height=5, width=10, device="pdf")
+```
+# ============================================
+# convert Hex color to LAB for color distance calculation
+# converter: https://hextoral.com/hex-to-lab-color-conversion/
+# ============================================
+```{r}
+# (1) Hex color
+stool_col_filter2 <- stool_col_filter %>%
+  mutate(color_model_hex = 
+           case_when(color_model == "Dark Brown" ~ "#392803",
+                     color_model == "Brown" ~ "#5F4119",
+                     color_model == "Rust Brown" ~ "#7d4b19",
+                     color_model == "Peanut Butter Brown" ~ "#cd9141",
+                     color_model == "Yellow Brown" ~ "#986505",
+                     color_model == "Light Brown" ~ "#785414",
+                     color_model == "Greenish Brown" ~ "#765f14",
+                     color_model == "Greenish Tan" ~ "#856f0c",
+                     color_model == "Mustard Yellow" ~ "#b58f2a",
+                     color_model == "Light Green" ~ "#7d841d",
+                     color_model == "Camo Green" ~ "#4b4b08",
+                     color_model == "Evergreen" ~ "#3c451f",
+                     color_model == "Dark Green" ~ "#243003",
+                     color_model == "Golden Yellow" ~ "#ffcc00",
+                     color_model == "Bright Yellow" ~ "#FFFF00",
+                     color_model == "Orange" ~ "#c37008",
+                     color_model == "Red Orange" ~ "#9a3e0f",
+                     color_model == "Red" ~ "#9e0b00",
+                     color_model == "Chalk Grey" ~ "#b4b3af"
+                     ),
+         color_report_hex = 
+           case_when(color_report == "Dark Brown" ~ "#392803",
+                     color_report == "Brown" ~ "#5F4119",
+                     color_report == "Rust Brown" ~ "#7d4b19",
+                     color_report == "Peanut Butter Brown" ~ "#cd9141",
+                     color_report == "Yellow Brown" ~ "#986505",
+                     color_report == "Light Brown" ~ "#785414",
+                     color_report == "Greenish Brown" ~ "#765f14",
+                     color_report == "Greenish Tan" ~ "#856f0c",
+                     color_report == "Mustard Yellow" ~ "#b58f2a",
+                     color_report == "Light Green" ~ "#7d841d",
+                     color_report == "Camo Green" ~ "#4b4b08",
+                     color_report == "Evergreen" ~ "#3c451f",
+                     color_report == "Dark Green" ~ "#243003",
+                     color_report == "Golden Yellow" ~ "#ffcc00",
+                     color_report == "Bright Yellow" ~ "#FFFF00",
+                     color_report == "Orange" ~ "#c37008",
+                     color_report == "Red Orange" ~ "#9a3e0f",
+                     color_report == "Red" ~ "#9e0b00",
+                     color_report == "Chalk Grey" ~ "#b4b3af"
+           ))
+
+## (2) RGB
+
+stool_col_filter2 <- stool_col_filter2 %>%
+  mutate(color_model_R = 
+           case_when(color_model_hex == "#392803" ~ "57",
+                     color_model_hex == "#5F4119" ~ "95",
+                     color_model_hex == "#7d4b19" ~ "125",
+                     color_model_hex == "#cd9141" ~ "205",
+                     color_model_hex == "#986505" ~ "152",
+                     color_model_hex == "#785414" ~ "120",
+                     color_model_hex == "#765f14" ~ "118",
+                     color_model_hex == "#856f0c" ~ "133",
+                     color_model_hex == "#b58f2a" ~ "181",
+                     color_model_hex == "#7d841d" ~ "125",
+                     color_model_hex == "#4b4b08" ~ "75",
+                     color_model_hex == "#3c451f" ~ "60",
+                     color_model_hex == "#243003" ~ "36",
+                     color_model_hex == "#ffcc00" ~ "255",
+                     color_model_hex == "#FFFF00" ~ "255",
+                     color_model_hex == "#c37008" ~ "195",
+                     color_model_hex == "#9a3e0f" ~ "154",
+                     color_model_hex == "#9e0b00" ~ "158",
+                     color_model_hex == "#b4b3af" ~ "180"
+                     ),
+         color_model_G = 
+           case_when(color_model_hex == "#392803" ~ "40",
+                     color_model_hex == "#5F4119" ~ "65",
+                     color_model_hex == "#7d4b19" ~ "75",
+                     color_model_hex == "#cd9141" ~ "145",
+                     color_model_hex == "#986505" ~ "101",
+                     color_model_hex == "#785414" ~ "84",
+                     color_model_hex == "#765f14" ~ "95",
+                     color_model_hex == "#856f0c" ~ "111",
+                     color_model_hex == "#b58f2a" ~ "143",
+                     color_model_hex == "#7d841d" ~ "132",
+                     color_model_hex == "#4b4b08" ~ "75",
+                     color_model_hex == "#3c451f" ~ "69",
+                     color_model_hex == "#243003" ~ "48",
+                     color_model_hex == "#ffcc00" ~ "204",
+                     color_model_hex == "#FFFF00" ~ "204",
+                     color_model_hex == "#c37008" ~ "112",
+                     color_model_hex == "#9a3e0f" ~ "62",
+                     color_model_hex == "#9e0b00" ~ "11",
+                     color_model_hex == "#b4b3af" ~ "179"
+                     ),
+         color_model_B = 
+           case_when(color_model_hex == "#392803" ~ "3",
+                     color_model_hex == "#5F4119" ~ "25",
+                     color_model_hex == "#7d4b19" ~ "25",
+                     color_model_hex == "#cd9141" ~ "65",
+                     color_model_hex == "#986505" ~ "5",
+                     color_model_hex == "#785414" ~ "20",
+                     color_model_hex == "#765f14" ~ "20",
+                     color_model_hex == "#856f0c" ~ "12",
+                     color_model_hex == "#b58f2a" ~ "42",
+                     color_model_hex == "#7d841d" ~ "29",
+                     color_model_hex == "#4b4b08" ~ "8",
+                     color_model_hex == "#3c451f" ~ "31",
+                     color_model_hex == "#243003" ~ "3",
+                     color_model_hex == "#ffcc00" ~ "0",
+                     color_model_hex == "#FFFF00" ~ "0",
+                     color_model_hex == "#c37008" ~ "8",
+                     color_model_hex == "#9a3e0f" ~ "15",
+                     color_model_hex == "#9e0b00" ~ "0",
+                     color_model_hex == "#b4b3af" ~ "175"
+                     ))
+
+write.csv(stool_col_filter2, file = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/Rtable/stoo_col_rgb_BS457810.csv")
+
+### ********************
+## Test using package "colordistance
+### ********************
+
+# create a list. First split based on each subject into df, then combine to a list
+
+stool_col_filter2 <- stool_col_filter2 %>% mutate(pct = 0)
+
+# BS10
+STcol_10 <- stool_col_filter2[c(1:48),c(1,8:11)] %>%
+  filter(!is.na(color_model_R)) %>%
+  filter(!SampleID == "no_sample") %>%
+  column_to_rownames(var = "SampleID")
+
+STcol_10$color_model_R <- as.numeric(STcol_10$color_model_R)
+STcol_10$color_model_G <- as.numeric(STcol_10$color_model_G)
+STcol_10$color_model_B <- as.numeric(STcol_10$color_model_B)
+
+STcol_10list <- split(STcol_10, seq(nrow(STcol_10)))
+STcol_10list <- setNames(split(STcol_10, seq(nrow(STcol_10))), rownames(STcol_10)) # retain rwo name
+
+STcol_10_dist <- colordistance::getColorDistanceMatrix(STcol_10list, 
+                                      method="color.dist",
+                                      ordering=TRUE, 
+                                      plotting = FALSE)
+
+
+pdf(file = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/Rplot/col_dis_BS10.pdf", width = 7, height = 7)
+pheatmap(STcol_10_dist,
+         fontsize_row=5,
+         fontsize_col = 5,
+         border_color = "white"
+         )
+dev.off()
+
+
+STcol_10_dist.or <- STcol_10_dist %>%
+  as.data.frame() # order serially
+
+STcol_10_dist.or[,order(names(STcol_10_dist.or))]
+STcol_10_dist.or[1,]
+
+
+# BS3
+STcol_03 <- stool_col_filter2[c(49:81),c(1,8:11)] %>%
+  filter(!is.na(color_model_R)) %>%
+  column_to_rownames(var = "SampleID")
+
+STcol_03$color_model_R <- as.numeric(STcol_03$color_model_R)
+STcol_03$color_model_G <- as.numeric(STcol_03$color_model_G)
+STcol_03$color_model_B <- as.numeric(STcol_03$color_model_B)
+
+STcol_03list <- split(STcol_03, seq(nrow(STcol_03)))
+STcol_03list <- setNames(split(STcol_03, seq(nrow(STcol_03))), rownames(STcol_03)) # retain rwo name
+
+STcol_03_dist <- colordistance::getColorDistanceMatrix(STcol_03list, 
+                                      method="color.dist",
+                                      ordering=TRUE, 
+                                      plotting = FALSE)
+
+
+pdf(file = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/Rplot/col_dis_BS3.pdf", width = 5, height = 4)
+pheatmap(STcol_03_dist,
+         fontsize_row=5,
+         fontsize_col = 5,
+         border_color = "white"
+         )
+dev.off()
+
+
+# BS4
+STcol_04 <- stool_col_filter2[c(82:115),c(1,8:11)] %>%
+  filter(!is.na(color_model_R)) %>%
+  filter(!SampleID == "no_sample") %>%
+  column_to_rownames(var = "SampleID")
+
+STcol_04$color_model_R <- as.numeric(STcol_04$color_model_R)
+STcol_04$color_model_G <- as.numeric(STcol_04$color_model_G)
+STcol_04$color_model_B <- as.numeric(STcol_04$color_model_B)
+
+STcol_04list <- split(STcol_04, seq(nrow(STcol_04)))
+STcol_04list <- setNames(split(STcol_04, seq(nrow(STcol_04))), rownames(STcol_04)) # retain rwo name
+
+STcol_04_dist <- colordistance::getColorDistanceMatrix(STcol_04list, 
+                                      method="color.dist",
+                                      ordering=TRUE, 
+                                      plotting = FALSE)
+
+
+pdf(file = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/Rplot/col_dis_BS4.pdf", width = 5, height =4)
+pheatmap(STcol_04_dist,
+         fontsize_row=5,
+         fontsize_col = 5,
+         border_color = "white"
+         )
+dev.off()
+
+
+
+# BS8
+STcol_08 <- stool_col_filter2[c(191:230),c(1,8:11)] %>%
+  filter(!is.na(color_model_R)) %>%
+  filter(!SampleID == "no_sample") %>%
+  column_to_rownames(var = "SampleID")
+
+STcol_08$color_model_R <- as.numeric(STcol_08$color_model_R)
+STcol_08$color_model_G <- as.numeric(STcol_08$color_model_G)
+STcol_08$color_model_B <- as.numeric(STcol_08$color_model_B)
+
+STcol_08list <- split(STcol_08, seq(nrow(STcol_08)))
+STcol_08list <- setNames(split(STcol_08, seq(nrow(STcol_08))), rownames(STcol_08)) # retain rwo name
+
+STcol_08_dist <- colordistance::getColorDistanceMatrix(STcol_08list, 
+                                      method="color.dist",
+                                      ordering=TRUE, 
+                                      plotting = FALSE)
+
+
+pdf(file = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/Rplot/col_dis_BS8.pdf", width = 5, height =5)
+pheatmap(STcol_08_dist,
+         fontsize_row=5,
+         fontsize_col = 5,
+         border_color = "white"
+         )
+dev.off()
+
+
+# BS7
+STcol_07 <- stool_col_filter2[c(155:190),c(1,8:11)] %>%
+  filter(!is.na(color_model_R)) %>%
+  filter(!SampleID == "no_sample") %>%
+  column_to_rownames(var = "SampleID")
+
+STcol_07$color_model_R <- as.numeric(STcol_07$color_model_R)
+STcol_07$color_model_G <- as.numeric(STcol_07$color_model_G)
+STcol_07$color_model_B <- as.numeric(STcol_07$color_model_B)
+
+STcol_07list <- split(STcol_07, seq(nrow(STcol_07)))
+STcol_07list <- setNames(split(STcol_07, seq(nrow(STcol_07))), rownames(STcol_07)) # retain rwo name
+
+STcol_07_dist <- colordistance::getColorDistanceMatrix(STcol_07list, 
+                                      method="color.dist",
+                                      ordering=TRUE, 
+                                      plotting = FALSE)
+
+
+pdf(file = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/Rplot/col_dis_BS7.pdf", width = 5, height =4)
+pheatmap(STcol_07_dist,
+         fontsize_row=5,
+         fontsize_col = 5,
+         border_color = "white"
+         )
+dev.off()
+
+
+# BS5
+STcol_05 <- stool_col_filter2[c(116:154),c(1,8:11)] %>%
+  filter(!is.na(color_model_R)) %>%
+  filter(!SampleID == "no_sample") %>%
+  column_to_rownames(var = "SampleID")
+
+STcol_05$color_model_R <- as.numeric(STcol_05$color_model_R)
+STcol_05$color_model_G <- as.numeric(STcol_05$color_model_G)
+STcol_05$color_model_B <- as.numeric(STcol_05$color_model_B)
+
+STcol_05list <- split(STcol_05, seq(nrow(STcol_05)))
+STcol_05list <- setNames(split(STcol_05, seq(nrow(STcol_05))), rownames(STcol_05)) # retain row name
+
+STcol_05_dist <- colordistance::getColorDistanceMatrix(STcol_05list, 
+                                      method="color.dist",
+                                      ordering=TRUE, 
+                                      plotting = FALSE)
+
+
+pdf(file = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/Rplot/col_dis_BS5.pdf", width = 5, height =4)
+pheatmap(STcol_05_dist,
+         fontsize_row=5,
+         fontsize_col = 5,
+         border_color = "white"
+         )
+dev.off()
+```
+
+# ============================================
+## PCoA plot for color distance
+# ============================================
+```{r}
+#### test on BS10 and BS8 #### 
+STcol_10_dist[is.na(STcol_10_dist)] <- 0
+
+
+STcol_10_dist.scale <- cmdscale(scale(STcol_10_dist),
+                                eig = TRUE,
+                                x.ret = TRUE)
+
+STcol_10_dist.scale2 <- round(STcol_10_dist.scale$eig/sum(STcol_10_dist.scale$eig)*100,1) #calculate the amount of variation each axis in the MDS plot accounts for using the eigen values.
+
+STcol_10_dist.nmdsValue <- STcol_10_dist.scale$points
+
+STcol_10_dist.nmdsData <- data.frame(Sample = rownames(STcol_10_dist.nmdsValue),
+           x = STcol_10_dist.nmdsValue[,1],
+           y = STcol_10_dist.nmdsValue[,2])
+
+STcol_10_dist.nmdsData
+
+# plot
+
+pdf(file = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/Rplot/col_dis.nmds_BS8.pdf", width =8, height =5)
+
+STcol_08_dist.nmdsData %>%
+  ggplot(aes(x = x, y = y, label = Sample)) +
+  geom_point(aes(color = Sample)) +
+  #geom_text(size= 3) +
+   geom_text_repel(min.segment.length = 0, 
+                   box.padding = 0.5,
+                   max.overlaps = Inf,
+                   segment.linetype = 5,
+                   segment.size = 0.2,
+                   size = 2) +
+  theme_bw() +
+  xlab(paste("MDS1", STcol_08_dist.scale2[1], "%", sep = "")) +
+  ylab(paste("MDS2", STcol_08_dist.scale2[2], "%", sep = "")) +
+  ggtitle("MDS plot of BS8 stool color distance")
+
+dev.off()
+
+
+## no text
+pdf(file = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/Rplot/col_dis.nmds_BS10.2.pdf", width =8, height =5)
+
+STcol_10_dist.nmdsData %>%
+  ggplot(aes(x = x, y = y, label = Sample)) +
+  geom_point(aes(color = Sample), size = 3) +
+  theme_bw() +
+  xlab(paste("MDS1", STcol_10_dist.scale2[1], "%", sep = "")) +
+  ylab(paste("MDS2", STcol_10_dist.scale2[2], "%", sep = "")) +
+  ggtitle("MDS plot of BS10 stool color distance")
+
+dev.off()
+```
+
