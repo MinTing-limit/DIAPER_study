@@ -48,8 +48,6 @@ library(factoextra) # for dendogram
 # Create funciton for converting Metaphlan file to phyloseq
 ##=========================================================
 ```{r}
-## make function based on
-# https://www.biostars.org/p/449688/
 metaphlanToPhyloseq <- function(
   tax,
   metadat=NULL,
