@@ -1,0 +1,1225 @@
+---
+title: "BS5_shotgun_20220601"
+author: "Min-Ting"
+date: "6/1/2022"
+output: html_document
+---
+
+#Save the entire list of environments objects
+```{r}
+# save
+save.image(file = "BS5_shotgun.RData")
+dir("/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531")
+
+#load environment
+load("/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/BS5_shotgun.RData")
+```
+
+# ============================
+# libraries
+# ============================
+```{r}
+library(genefilter)
+library(ggpubr)
+library(UpSetR)
+library(randomcoloR)
+library(circlize)
+library(RColorBrewer)
+library(qiime2R)
+library(tidyverse)
+library(phyloseq)
+library(DESeq2)
+library(ggplot2)
+library(ComplexHeatmap)
+library(curatedMetagenomicData)
+library(ggsci)
+library(Polychrome)
+library(OTUtable)
+
+# packages for fuzzy c-means
+library(ppclust)
+library(factoextra)
+library(cluster)
+library(fclust)
+library(e1071)
+library(reshape2)
+
+# group higher
+library(file2meco)
+library(microeco)
+library(magrittr)
+
+# heatmap
+library(scales)
+library(viridis)
+
+library(ggforce)
+library(ggthemes)
+library(gridExtra)
+```
+
+##=========================================================
+# Create funciton for converting Metaphlan file to phyloseq
+##=========================================================
+```{r}
+metaphlanToPhyloseq <- function(
+  tax,
+  metadat=NULL,
+  simplenames=TRUE,
+  roundtointeger=FALSE,
+  split="|"){
+  ## tax is a matrix or data.frame with the table of taxonomic abundances, rows are taxa, columns are samples
+  ## metadat is an optional data.frame of specimen metadata, rows are samples, columns are variables
+  ## if simplenames=TRUE, use only the most detailed level of taxa names in the final object
+  ## if roundtointeger=TRUE, values will be rounded to the nearest integer
+  xnames = rownames(tax)
+  shortnames = gsub(paste0(".+\\", split), "", xnames)
+  if(simplenames){
+    rownames(tax) = shortnames
+  }
+  if(roundtointeger){
+    tax = round(tax * 1e4)
+  }
+  x2 = strsplit(xnames, split=split, fixed=TRUE)
+  taxmat = matrix(NA, ncol=max(sapply(x2, length)), nrow=length(x2))
+  colnames(taxmat) = c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species", "Strain")[1:ncol(taxmat)]
+  rownames(taxmat) = rownames(tax)
+  for (i in 1:nrow(taxmat)){
+    taxmat[i, 1:length(x2[[i]])] <- x2[[i]]
+  }
+  taxmat = gsub("[a-z]__", "", taxmat)
+  taxmat = phyloseq::tax_table(taxmat)
+  otutab = phyloseq::otu_table(tax, taxa_are_rows=TRUE)
+  if(is.null(metadat)){
+    res = phyloseq::phyloseq(taxmat, otutab)
+  }else{
+    res = phyloseq::phyloseq(taxmat, otutab, phyloseq::sample_data(metadat))
+  }
+  return(res)
+}
+```
+
+##=========================================================
+# Metaphlan convert to phyloseq
+##=========================================================
+```{r}
+## import Metaphlandata
+mpa <- read_csv("/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/BS5_merged_abundance_table.csv")
+
+mpa <- mpa %>%
+  column_to_rownames(var = "taxonomy") # move taxonomy to rowname
+
+## import metadata
+meta <- read_csv("/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/BS5_meta_20220531.csv")
+
+meta_df <- as.data.frame(meta)
+meta_df <- meta_df[c(1:39),] # remove 42 as no sample...
+row.names(meta_df) <- meta_df$SampleID
+samples_df <- meta_df %>% select(SampleID)
+sample <- sample_data(samples_df)
+
+sample2 <- sample_data(meta_df)
+
+## convert mpa to phyloseq
+ps = metaphlanToPhyloseq(mpa, metadat = sample)
+ps2 = metaphlanToPhyloseq(mpa, metadat = sample2)
+
+
+```
+
+##=========================================================
+# Taxonomy table
+##=========================================================
+```{r}
+taxa <- ps %>%
+  tax_table() %>%
+  as.data.frame()
+```
+
+##=========================================================
+# Stacked bar- Phylum
+##=========================================================
+```{r}
+## phylum (put NA as uncharacterized)
+ps_phylum <- ps %>%
+  tax_glom(taxrank =  "Phylum",
+           NArm = FALSE) %>%
+  transform_sample_counts(function(x) {x/sum(x)}) %>%
+  psmelt()
+
+## phylum-- ignore NA
+ps_phylum_nona <- ps %>%
+  tax_glom(taxrank =  "Phylum",
+           NArm = TRUE) %>%
+  transform_sample_counts(function(x) {x/sum(x)}) %>%
+  psmelt()
+
+# replace NA with uncharacterized
+ps_phylum[["Phylum"]][is.na(ps_phylum[["Phylum"]])] <- "Uncharacterized"
+
+# how many phylum?
+ps_phylum %>%
+  group_by(Phylum) %>%
+  summarise(n = n()) # 6
+
+nb.6.col <- colorRampPalette((brewer.pal(8,"Set1")))(6)
+## if colorRampPalette(rev(brewer.pal(8,"Set2")))(5) thab reverse 
+nb.6.colorblind <- c("#56B4E9", "#CC79A7",
+          "#F0E442", "#0072B2", "#009E73","#999999")
+
+colnames(ps_phylum[2]) <- "SampleID"
+
+# plot, with NA
+ps_phylum %>%
+  left_join(meta_df, by = "SampleID") %>%
+  ggplot(aes(x = SampleID, y = Abundance, fill = Phylum)) +
+  geom_bar(stat = "identity",
+           position = "fill"
+           ) +
+  scale_fill_manual(values = nb.6.colorblind) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45,
+                                   vjust = 1,
+                                   hjust = 1),
+        text = element_text(size=8))
+
+ggsave(path = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output",filename = "stackBar_phylum.pdf", height=3, width=6, device="pdf")
+
+
+# plot, no NA
+ps_phylum_nona %>%
+  left_join(meta_df, by = "SampleID") %>%
+  ggplot(aes(x = SampleID, y = Abundance, fill = Phylum)) +
+  geom_bar(stat = "identity",
+           position = "fill"
+           ) +
+  scale_fill_manual(values = nb.6.colorblind) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45,
+                                   vjust = 1,
+                                   hjust = 1),
+        text = element_text(size=8))
+
+ggsave(path = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output",filename = "stackBar_phylum_nona.pdf", height=3, width=6, device="pdf")
+
+
+```
+
+
+##=========================================================
+# Stacked bar- Genus
+##=========================================================
+```{r}
+ps_genus_nona <- ps %>%
+  tax_glom(taxrank =  "Genus",
+           NArm = TRUE) %>%
+  transform_sample_counts(function(x) {x/sum(x)}) %>%
+  psmelt()
+
+
+temp <- ps_genus_nona[,c(2,3,10)] %>%
+  filter(Genus == "Bacteroides")
+
+# how many genera?
+ps_genus_nona %>%
+  group_by(Genus) %>%
+  summarise(n = n()) # 38
+
+nb.38.col <- colorRampPalette((brewer.pal(8,"Set2")))(38)
+  #glasbey.colors(32)
+nb.38.col2 <- distinctColorPalette(38)
+
+# plot
+ps_genus_nona %>%
+  left_join(meta_df, by = "SampleID") %>%
+  ggplot(aes(x = SampleID, y = Abundance, fill = Genus)) +
+  geom_bar(stat = "identity",
+           position = "fill",
+           color = "grey25",
+           ) +
+  scale_fill_manual(values = nb.38.col) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45,
+                                   vjust = 1,
+                                   hjust = 1),
+        text = element_text(size=8))
+
+ggsave(path = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output",filename = "stackBar_Genus_nona.pdf", height=5, width=8, device="pdf")
+
+
+
+ps_genus_nona %>%
+  left_join(meta_df, by = "SampleID") %>%
+  ggplot(aes(x = SampleID, y = Abundance, fill = Genus)) +
+  geom_bar(stat = "identity",
+           position = "fill",
+           #color = "grey25",
+           ) +
+  scale_fill_manual(values = nb.38.col2) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45,
+                                   vjust = 1,
+                                   hjust = 1),
+        text = element_text(size=8))
+ggsave(path = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output",filename = "stackBar_Genus_nonaV2.pdf", height=5, width=8, device="pdf")
+
+```
+
+
+##=========================================================
+# Stacked bar- Species
+##=========================================================
+```{r}
+ps_species_nona <- ps %>%
+  tax_glom(taxrank =  "Species",
+           NArm = TRUE) %>%
+  transform_sample_counts(function(x) {x/sum(x)}) %>%
+  psmelt()
+
+# how many genera?
+ps_species_nona %>%
+  group_by(Species) %>%
+  summarise(n = n()) # 70
+
+#get 67 colors
+nb.70.col <- distinctColorPalette(70)
+
+# plot
+ps_species_nona %>%
+  left_join(meta_df, by = "SampleID") %>%
+  ggplot(aes(x = SampleID, y = Abundance, fill = Species)) +
+  geom_bar(stat = "identity",
+           position = "fill",
+           #color = "grey25",
+           ) +
+  scale_fill_manual(values = nb.70.col) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45,
+                                   vjust = 1,
+                                   hjust = 1),
+        text = element_text(size=8))
+
+ggsave(path = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output",filename = "stackBar_species_nona.pdf", height=5, width=12, device="pdf")
+```
+
+
+##=========================================================
+# Species-- Bifidobacterium sp. and Bacteroides boxplot
+##=========================================================
+```{r}
+
+pdf(file ="/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output/BifidobacteriumSp.pdf", height=3, width=6)
+
+ps_species_nona %>%
+  filter(Genus == "Bifidobacterium") %>%
+  #group_by(Species) %>%
+  #summarise(n = n())     # 3 species of Bifidobacterium
+  ggplot(aes(x = SampleID, y = Abundance,
+             color = Species, group = Species)) +
+  geom_point(size = 1) +
+  scale_color_brewer(palette = "Set1") +
+  #scale_color_manual(values= c("#FFCE30","#746AB0","#288BA8"))  +
+  geom_line()+
+  #facet_grid(~Species, space="free", scales="free") +
+  #scale_y_discrete(expand=c(0.3, 0))+
+  xlab('SampleID') +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45,
+                                   vjust = 1,
+                                   hjust = 1),
+        text = element_text(size=8))
+
+dev.off()
+
+
+# Bacteroides
+
+pdf(file ="/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output/BacteroidesSp.pdf", height=3, width=6)
+
+ps_species_nona %>%
+  filter(Genus == "Bacteroides") %>%
+  #group_by(Species) %>%
+  #summarise(n = n())     # 6 species of Bacteroides
+  ggplot(aes(x = SampleID, y = Abundance,
+             color = Species, group = Species)) +
+  geom_point(size = 1) +
+  scale_color_brewer(palette = "Dark2") +
+  #scale_color_manual(values= c("#FFCE30","#746AB0","#288BA8"))  +
+  geom_line()+
+  #facet_grid(~Species, space="free", scales="free") +
+  #scale_y_discrete(expand=c(0.3, 0))+
+  xlab('SampleID') +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45,
+                                   vjust = 1,
+                                   hjust = 1),
+        text = element_text(size=8))
+dev.off()
+
+
+```
+
+# ============================
+# stool color
+# ============================
+```{r}
+meta_df %>%
+  group_by(color_of_stool) %>%
+  summarise(n = n())
+
+# sample in physeq
+sample_data(ps)
+
+meta$color_of_stool[is.na(meta$color_of_stool)] <- "no_fill"
+
+stool_color <- meta[,c(1,23)] %>%
+  mutate(plot = 1) %>%
+  filter(SampleID %in% rownames(sample_data(ps))) %>% # only those sequenced
+  pivot_wider(names_from = "color_of_stool", values_from = "plot")
+
+stool_color[is.na(stool_color)] <- 0
+
+
+pdf(file ="/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output/stool_color.pdf", height=3, width=10)
+
+ meta[,c(1,23)] %>%
+   filter(SampleID %in% rownames(sample_data(ps))) %>% # only those sequenced
+   ggplot(aes(x = SampleID, y = color_of_stool,
+              col = factor(color_of_stool))) +
+   geom_point(size = 4)+
+   scale_color_manual(values = c("Bright Yellow" = "#FFFF00",
+                               "Brown" = "#9c6137",
+                               "Camo Green" = "#818905",
+                               "Golden Yellow" = "#fcc201",
+                               "Mustard Yellow" = "#e1ad01",
+                               "Orange" = "#ff8303",
+                               "Peanut Butter Brown" = "#cd9141",
+                               "no_fill" = "black")) +
+   theme_bw() +
+   theme(axis.text.x = element_text(angle = 45,
+                                   vjust = 1,
+                                   hjust = 1),
+        text = element_text(size=8))
+   
+dev.off()
+
+```
+
+# ============================
+## Feeding mode
+# ============================
+```{r}
+meta_df %>%
+  group_by(feed_baby_today) %>%
+  summarise(n = n())
+
+# sample in physeq
+sample_data(ps)
+
+meta$feed_baby_today[is.na(meta$feed_baby_today)] <- "No_data"
+
+feed_baby_today <- meta[,c(1,34)] %>%
+  mutate(plot = 1) %>%
+  filter(SampleID %in% rownames(sample_data(ps))) %>% # only those sequenced
+  pivot_wider(names_from = "feed_baby_today", values_from = "plot")
+
+feed_baby_today[is.na(feed_baby_today)] <- 0
+
+
+pdf(file ="/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output/feed_baby_today.pdf", height=2, width=10)
+
+ meta[,c(1,34)] %>%
+   filter(SampleID %in% rownames(sample_data(ps))) %>% # only those sequenced
+   ggplot(aes(x = SampleID, y = feed_baby_today,
+              col = factor(feed_baby_today))) +
+   geom_point(size = 4)+
+   theme_bw() +
+   theme(axis.text.x = element_text(angle = 45,
+                                   vjust = 1,
+                                   hjust = 1),
+        text = element_text(size=8))
+   
+dev.off()
+
+```
+
+##=========================================================
+# Functional Pathway 
+##=========================================================
+```{r}
+## *******
+# This is the stratified one 
+## *******
+
+path <- read_csv("/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/merged_BS5_pathabundance-cpm.csv")
+
+
+# remove those with over half 0
+path_simple <- path[rowSums(path == 0) <= 20, ] #from 3675 to 951
+
+path_simple <- path_simple %>%
+  mutate(path_ID = paste0("pathway_", 1:nrow(.)))
+
+# plot
+pdf(file ="/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output/path_stratified.pdf", height=10, width=3)
+
+path_simple %>%
+  filter(!Pathway == "UNMAPPED") %>%
+  filter(!Pathway == "UNINTEGRATED") %>% #949 left
+  select(-Pathway) %>%
+  pivot_longer(-path_ID, names_to = "SampleID", values_to = "CPM") %>%
+  group_by(SampleID, path_ID) %>%
+  summarise(avg_CPM = mean(CPM)) %>%
+  pivot_wider(names_from = "SampleID", values_from = "avg_CPM") %>%
+  column_to_rownames(var = "path_ID") %>%
+  t() %>%
+  as.matrix() %>%
+  scale() %>%
+  t() %>%
+  pheatmap(cluster_cols = F,
+           color=colorRampPalette(c("navy", "white", "red"))(100),
+           fontsize_row = 0.5,
+           fontsize_col = 5)
+
+dev.off()
+
+
+
+## *******
+# This is the unstratified one 
+## *******
+
+path_stratified <- read_csv("/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/merged_BS5_pathabundance-cpm_unstratified.csv")
+
+# group pathways
+path_stratified2 <- read_csv("/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/merged_BS5_pathabundance-cpm_unstratified2.csv")
+
+path_stratified2 %>%
+  group_by(Super_path) %>%
+  summarise(n = n())
+
+# remove those with over half 0
+path_stratified.simple <- path_stratified[rowSums(path_stratified == 0) <= 20, ] #from 374 to 304
+
+
+
+
+# plot
+pdf(file ="/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output/path_unstratified.pdf", height=10, width=5)
+
+path_stratified.simple %>%
+  filter(!Pathway == "UNMAPPED") %>%
+  filter(!Pathway == "UNINTEGRATED") %>% # 302 left
+  pivot_longer(-Pathway, names_to = "SampleID", values_to = "CPM") %>%
+  group_by(SampleID, Pathway) %>%
+  summarise(avg_CPM = mean(CPM)) %>%
+  pivot_wider(names_from = "SampleID", values_from = "avg_CPM") %>%
+  column_to_rownames(var = "Pathway") %>%
+  t() %>%
+  as.matrix() %>%
+  scale() %>%
+  t() %>%
+  pheatmap(cluster_cols = F,
+           color=colorRampPalette(c("navy", "white", "red"))(100),
+           fontsize_row = 2,
+           fontsize_col = 5)
+
+dev.off()
+```
+
+## ******** Pathway heatmap based on PAM clustering ************
+# 2022.09.23
+```{r}
+#### Make data as a dataframe for easy handling
+path_stratified.simple.plot <- path_stratified.simple %>%
+  filter(!Pathway == "UNMAPPED") %>%
+  filter(!Pathway == "UNINTEGRATED") %>% # 302 left
+  pivot_longer(-Pathway, names_to = "SampleID", values_to = "CPM") %>%
+  group_by(SampleID, Pathway) %>%
+  summarise(avg_CPM = mean(CPM)) %>%
+  pivot_wider(names_from = "SampleID", values_from = "avg_CPM") %>%
+  column_to_rownames(var = "Pathway") %>%
+  t() %>%
+  as.matrix() %>%
+  scale() %>%
+  t()
+
+# merge with PAM clustering- Column annotation
+PAM_BS5 <- meta_df %>%
+  left_join(PAM_6, by = "SampleID") %>%
+  select(c("SampleID","PAM_name"))
+
+PAM_BS5 <- PAM_BS5 %>%
+  column_to_rownames(var = "SampleID")
+
+
+# Pathway superclass II - row annotation
+path_stratified_rowAnn <- path_stratified.simple.plot %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "path") %>%
+  left_join(path_super_clean[,c(1,3)], by = "path") %>%
+  select(c("path", "Superclass2"))
+
+path_stratified_rowAnn <- path_stratified_rowAnn %>%
+  column_to_rownames(var = "path")
+
+path_stratified_rowAnn  %>%
+  group_by(Superclass2) %>%
+  summarise(n = n())  # 39
+
+nb.39.col <- distinctColorPalette(39)
+
+# path annotation color- PAM and superclass
+PAM_color <- colorRampPalette(grDevices::rainbow(length(unique(PAM_BS5$PAM_name))))
+path_color <- PAM_color(length(unique(PAM_BS5$PAM_name))) ##values of colors
+names(path_color) <- unique(PAM_BS5$PAM_name) ## give it name
+
+
+
+names(nb.39.col) <- unique(path_stratified_rowAnn$Superclass2)
+
+
+path_colors <- list(PAM_name = path_color,
+                   Superclass2 = nb.39.col) ## make it a list
+
+
+
+
+# *********** PLOT *************
+
+pdf(file ="/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output/path_unstratified_PAM.super2.pdf", height=12, width=10)
+
+path_stratified.simple.plot %>%
+  pheatmap(cluster_cols = T,  ##v2 = TRUE
+           annotation_col = PAM_BS5,
+           annotation_row = path_stratified_rowAnn,
+           annotation_colors = path_colors,
+           color=colorRampPalette(c("navy", "white", "red"))(100),
+           fontsize_row = 2,
+           fontsize_col = 5)
+
+dev.off()
+```
+
+## ******** Pathway heatmap based on PAM clustering- PART II ************
+# 2022.09.23
+```{r}
+colnames(path_super_clean)[1] <- "Pathway"
+
+
+# simple naming of superclass
+
+write_csv(path_super_clean, "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/path_super_clean.csv")
+
+path_super_clean <- read_csv("/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/path_super_clean.csv")
+
+# for checking Superclass ...
+path_stratified.simple %>%
+  filter(!Pathway == "UNMAPPED") %>%
+  filter(!Pathway == "UNINTEGRATED") %>% # 302 left
+  pivot_longer(-Pathway, names_to = "SampleID", values_to = "CPM") %>%
+  group_by(SampleID, Pathway) %>%
+  summarise(avg_CPM = mean(CPM)) %>%
+  left_join(PAM_6[,c(1,3)], by = "SampleID") %>%
+  left_join(path_super_clean[,c(1,4)], by = "Pathway") %>%
+  group_by(Superclass2_re) %>%
+  summarise(n = n())
+
+path_super_clean %>%
+  group_by(Superclass2_re) %>%
+  summarise(n = n())
+
+
+#  ******* PLOT and SAVE *********
+
+pdf(file ="/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output/path_unstratified_PAM.super2_each/ALL.pdf", height =20, width=14)
+
+path_stratified.simple %>%
+  filter(!Pathway == "UNMAPPED") %>%
+  filter(!Pathway == "UNINTEGRATED") %>% # 302 left
+  pivot_longer(-Pathway, names_to = "SampleID", values_to = "CPM") %>%
+  group_by(SampleID, Pathway) %>%
+  summarise(avg_CPM = mean(CPM)) %>%
+  left_join(PAM_6[,c(1,3)], by = "SampleID") %>%
+  left_join(path_super_clean[,c(1,4)], by = "Pathway") %>%
+  #filter(Superclass2_re == "Amine_and_Polyamine_Degradation") %>%   #### change here ###
+  ggplot() +
+  geom_tile(aes(x = SampleID, y = Pathway, fill = avg_CPM)) +
+  #scale_fill_viridis(option="F", direction = -1) +
+  scale_fill_gradient(low="white", high="#e04d38") +
+  theme_bw() +
+  facet_grid(Superclass2_re ~ PAM_name, scales = "free", space = "free_x") +
+  guides(fill = guide_colourbar(title.position = "top")) +
+  theme(legend.position = "top") +
+  theme(axis.text.y = element_text(size = 5, color = "black"),
+        axis.text.x = element_text(angle = 45, 
+                                   hjust = 1, size = 3, color = "black"))
+  #labs(title = "Amine_and_Polyamine_Degradation")  ## change here ##
+
+dev.off()
+
+##### test
+test <- path_stratified.simple %>%
+  filter(!Pathway == "UNMAPPED") %>%
+  filter(!Pathway == "UNINTEGRATED") %>% # 302 left
+  pivot_longer(-Pathway, names_to = "SampleID", values_to = "CPM") %>%
+  group_by(SampleID, Pathway) %>%
+  summarise(avg_CPM = mean(CPM)) %>%
+  left_join(PAM_6[,c(1,3)], by = "SampleID") %>%
+  left_join(path_super_clean[,c(1,4)], by = "Pathway") 
+
+test_n <- path_stratified.simple %>%
+  filter(!Pathway == "UNMAPPED") %>%
+  filter(!Pathway == "UNINTEGRATED") %>% # 302 left
+  pivot_longer(-Pathway, names_to = "SampleID", values_to = "CPM") %>%
+  group_by(SampleID, Pathway) %>%
+  summarise(avg_CPM = mean(CPM)) %>%
+  left_join(PAM_6[,c(1,3)], by = "SampleID") %>%
+  left_join(path_super_clean[,c(1,4)], by = "Pathway") %>%
+  group_by(Superclass2_re) %>%
+  summarise(n = n())
+
+# test
+lapply(test_n$Superclass2_re, function(cc) {
+  ggplot(filter(test, Superclass2_re == cc),
+         aes(x = SampleID, y = Pathway, fill = avg_CPM)) +
+    geom_tile(aes(x = SampleID, y = Pathway, fill = avg_CPM)) +
+  scale_fill_gradient(low="white", high="#e04d38") +
+  theme_bw() +
+  facet_grid(cols = vars(PAM_name), scales = "free_x", space = "free_x") +
+  guides(fill = guide_colourbar(title.position = "top")) +
+  labs(x = "SampleID", y = NULL, title = sprintf("%s", cc)) +
+    theme_bw() +
+  #theme_tufte(base_family = "Helvetica") +
+  theme(axis.text.y = element_text(size = 5, color = "black"),
+        axis.text.x = element_text(angle = 45, 
+                                   hjust = 1, size = 4, color = "black"))
+    #theme(plot.title=element_text(hjust=0, size=6)) +
+    #theme(panel.spacing.x=unit(0.5, "cm")) +
+    #theme(panel.spacing.y=unit(0.5, "cm")) +
+    #theme(legend.title.align=1) +
+    #theme(legend.text=element_text(size=4)) +
+    #theme(legend.position = "top") +
+    #theme(legend.key.size=unit(0.2, "cm")) +
+    #theme(legend.key.width=unit(1, "cm"))
+   
+}) -> cclist
+
+cclist[["ncol"]] <- 2
+
+# save above
+pdf(file ="/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output/path_unstratified_PAM.super2_each/ALL.pdf", height =50, width=20)
+
+do.call(grid.arrange, c(cclist))
+
+dev.off()
+
+
+
+```
+
+
+# Fuzzy c-means 
+# 2022.08.31
+```{r}
+# Stratified path
+
+path_stratified_scale <-  path_stratified %>% 
+  filter(!Pathway == "UNMAPPED") %>%
+  filter(!Pathway == "UNINTEGRATED") %>%
+  pivot_longer(-Pathway, names_to = "SampleID", values_to = "CPM") %>%
+  group_by(SampleID, Pathway) %>%
+  mutate(avg_CPM = mean(CPM)) %>%
+  select(c("SampleID", "Pathway", "avg_CPM")) %>%
+  pivot_wider(names_from = "SampleID", values_from = "avg_CPM") %>%
+  column_to_rownames(var = "Pathway") %>%
+  t() %>%
+  as.matrix() %>%
+  scale() %>%
+  t() 
+
+path_stratified_scale <- path_stratified_scale[complete.cases(path_stratified_scale),]
+
+
+##############
+# Fuzzy c-means: Estimate the fuzzifier
+##############
+
+mestimate<- function(df){
+  N <-  dim(df)[[1]]
+  D <- dim(df)[[2]]
+  m.sj <- 1 + (1418/N + 22.05)*D^(-2) + (12.33/N +0.243)*D^(-0.0406*log(N) - 0.1134)
+  return(m.sj)
+}
+
+m <- mestimate(path_stratified_scale)
+
+
+##############
+# Fuzzy c-means: How many clusters?
+##############
+
+#helper function for the within sum of squared error
+sumsqr <- function(x, clusters){
+  sumsqr <- function(x) sum(scale(x, scale = FALSE)^2)
+  wss <- base::sapply(split(as.data.frame(x), clusters), sumsqr)
+  return(wss)
+}
+
+
+#get the wss for repeated clustering
+iterate_fcm_WSS <- function(df,m){
+  totss <- numeric()
+  for (i in 2:20){
+    FCMresults <- cmeans(df,centers=i,m=m)
+    totss[i] <- sum(sumsqr(df,FCMresults$cluster))
+  }
+  return(totss)
+}
+
+wss_2to20 <- iterate_fcm_WSS(path_stratified_scale, m)
+
+pdf(file ="/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output/path_cmeans_inflection.pdf", height=4, width=5)
+
+plot(1:20, wss_2to20[1:20], type="b", xlab="Number of Clusters", ylab="wss")
+
+dev.off()
+
+# proceed with k = 5?
+fcm_results <- cmeans(path_stratified_scale, centers= 5, m=m)
+
+# First we’ll look the centroid profiles:
+
+#get the centroids into a long dataframe:
+fcm_centroids <- fcm_results$centers
+fcm_centroids_df <- data.frame(fcm_centroids)
+fcm_centroids_df$cluster <- row.names(fcm_centroids_df)
+centroids_long <- tidyr::gather(fcm_centroids_df,"sample",'value',1:39)
+
+pdf(file ="/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output/path_cmeans_5cluster.pdf", height=5, width=7)
+
+ggplot(centroids_long, aes(x=sample,y=value, group=cluster, colour=as.factor(cluster))) + 
+  geom_line() +
+  xlab("Sample") +
+  ylab("Scaled pathway CPM") +
+  labs(title= "Cluster path.cpm by sample",color = "Cluster") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+
+dev.off()
+
+## We can assess the similarity of the cluster centroids to identify redundancy or high overlap. To do we simply correlate the cluster centroids with each other. If the centroids are too similar then they will have a high correlation. If your K number produces clusters with high correlation (say above 0.85) then consider reducing the number of clusters.
+
+cor(t(fcm_centroids))
+
+#It looks like we have good separation of the clusters as no cor score is above 0.85.
+
+
+### ****************
+#start with the input data
+fcm_plotting_df <- data.frame(path_stratified_scale)
+
+#add path
+fcm_plotting_df$path <- row.names(fcm_plotting_df)
+
+#bind cluster assinment
+fcm_plotting_df$cluster <- fcm_results$cluster
+
+#fetch the membership for each path/top scoring cluster
+fcm_plotting_df$membership <- sapply(1:length(fcm_plotting_df$cluster),function(row){
+  clust <- fcm_plotting_df$cluster[row]
+  fcm_results$membership[row,clust]
+})
+
+
+
+
+k_to_plot = 5  ##### change here
+
+#subset the dataframe by the cluster and get it into long form
+#using a little tidyr action
+cluster_plot_df <- dplyr::filter(fcm_plotting_df, cluster == k_to_plot) %>%
+  dplyr::select(.,1:39,membership,path) %>%
+  tidyr::gather(.,"sample",'value',1:39)
+
+#order the dataframe by score
+cluster_plot_df <- cluster_plot_df[order(cluster_plot_df$membership),]
+#set the order by setting the factors using forcats
+cluster_plot_df$path = forcats::fct_inorder(cluster_plot_df$path)
+
+#subset the cores by cluster
+core <- dplyr::filter(centroids_long, cluster == k_to_plot)
+
+
+
+pdf(file ="/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output/path_cluster5.pdf", height=4, width=7)
+
+ggplot(cluster_plot_df, aes(x=sample,y=value)) + 
+    geom_line(aes(colour=membership, group=path)) +
+    scale_colour_gradientn(colours=c('blue1','red2')) +
+    #this adds the core 
+    geom_line(data=core, aes(sample,value, group=cluster), color="black",inherit.aes=FALSE) +
+    xlab("Sample") +
+    ylab("Scaled pathway CPM") +
+    labs(title= paste0("Cluster ",k_to_plot," Expression by sample"),color = "Score") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) 
+
+dev.off()
+
+# In this plot, genes with a profile close to the core have a membership score approaching 1 (red) while those with divergent patterns have a score closer to 0 (blue). You can see there is some noise but the genes mostly fit the cluster model. If you observe many genes with low scores consider increasing your K as they’ve been ‘forced’ into a cluster in which they don’t belong. Too much noise in the data can also lead to low scoring genes.
+
+
+# below plot follow: https://www.datanovia.com/en/lessons/fuzzy-clustering-essentials/cmeans-r-function-compute-fuzzy-clustering/
+
+pdf(file ="/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output/path_cluster_pca.pdf", height=4, width=5)
+
+fviz_cluster(list(data = path_stratified_scale,
+                  cluster = fcm_results$cluster),
+             ellipse.type = "norm",
+             ellipse.level = 0.68,
+             palette = "Set2",
+             geom="point",
+             #ggtheme = theme_minimal()
+             )
+
+dev.off()
+```
+
+# export above
+```{r}
+fcm_plotting_df %>%
+  rownames_to_column(var = "Pathway") %>%
+  write_csv("/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output/path_5cluster_cmeans.csv")
+
+
+# combine the one with microbial contributor with pathway cluster
+
+path_cluster <- path %>%
+  left_join(path_ori_super2) %>%
+  left_join(fcm_plotting_df[,c(40,41)])
+
+write_csv(path_cluster, "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output/path_5cluster_microbe.csv")
+
+```
+
+
+# ============================
+# group metacyc path to higher
+# follow 
+# ============================
+```{r}
+# use origianl pathway table
+
+path_ori_meco <- humann2meco(abund_table = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/merged_BS5_pathabundance-cpm.tsv" , db = "MetaCyc")
+
+# rel = FALSE donot use relative abundance
+path_ori_meco$cal_abund(select_cols = 1:3, rel = FALSE)
+path_ori_meco$taxa_abund$Superclass2 %<>% .[!grepl("unclass", rownames(.)), ]
+
+path_ori_meco1 <- trans_abund$new(path_ori_meco, taxrank = "Superclass2", ntaxa = 10)
+
+path_ori_meco1$plot_bar(ylab_title = "Abundance (CPM)") +
+  coord_flip()
+
+
+##
+path_ori_meco$tax_table
+
+as.data.frame(path_ori_meco1$data_abund) %>%
+  group_by(Taxonomy) %>%
+  summarise(n = n()) ## 41
+
+
+## 
+nb.41.col <- distinctColorPalette(41)
+
+pdf(file ="/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output/path_groupMeco.pdf", height=6, width=20)
+
+as.data.frame(path_ori_meco1$data_abund) %>%
+  ggplot(aes(x = Sample, y = Abundance,
+             color = Taxonomy, group = Taxonomy)) +
+  geom_point(size = 1) +
+  scale_color_manual(values = nb.41.col) +
+  geom_line()+
+  #scale_y_discrete(expand=c(0.3, 0))+
+  xlab('SampleID') +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90,
+                                   vjust = 1,
+                                   hjust = 1,
+                                   size = 5),
+        text = element_text(size=10))
+
+dev.off()
+
+as.data.frame(path_ori_meco$tax_table) %>%
+  rownames_to_column(var = "Pathway") %>%
+  write_csv("/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output/path_groupMeco.csv")
+
+```
+
+# Group pathways in each cluster into superclass
+```{r}
+path_ori_super <- as.data.frame(path_ori_meco$tax_table) %>%
+  rownames_to_column(var = "path")
+
+## since the above includes microbial contributor but fcm did not, organize in the excel then import here:
+path_ori_super2 <- read_csv("/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output/path_groupMeco2.csv")
+
+path_ori_super2 %>%
+  group_by(path) %>%
+  summarise(n=n()) ## from this can see there are multiple contributor to one path, so lets simplify this...
+
+path_super_clean <- path_ori_super2[,c(2:4)] %>%
+  unique()
+  
+
+# combine and plot line
+
+pdf(file ="/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output/path_groupMeco_cluster.pdf", height=8, width=30)
+
+fcm_plotting_df %>%
+  left_join(path_super_clean, by = "path") %>%
+  pivot_longer(cols = -c(path,cluster,membership,Superclass1,Superclass2), names_to = "Sample", values_to = "Scaled_cpm") %>%
+  group_by(Sample, Superclass2) %>%
+  mutate(mean_scaled_cpm_superclass2 = mean(Scaled_cpm)) %>%
+  ggplot(aes(x = Sample, y = mean_scaled_cpm_superclass2,
+             color = Superclass2, group = Superclass2)) +
+  geom_point(size = 1) +
+  scale_color_manual(values = nb.41.col) +
+  geom_line()+
+  #scale_y_discrete(expand=c(0.3, 0))+
+  xlab('SampleID') +
+  theme_bw() +
+  facet_grid(~cluster, space="free", scales="free") +
+  theme(axis.text.x = element_text(angle = 90,
+                                   vjust = 1,
+                                   hjust = 1,
+                                   size = 5),
+        text = element_text(size=10)) +
+  theme(legend.position="bottom")
+dev.off()
+
+
+
+#######
+
+pdf(file ="/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output/path_groupMeco_cluster_hmap.pdf", height=10, width=25)
+
+fcm_plotting_df %>%
+  left_join(path_super_clean, by = "path") %>%
+  pivot_longer(cols = -c(path,cluster,membership,Superclass1,Superclass2), names_to = "Sample", values_to = "Scaled_cpm") %>%
+  group_by(Sample, Superclass2, cluster) %>%
+  mutate(mean_scaled_cpm_superclass2 = mean(Scaled_cpm)) %>%
+  ggplot(aes(x = Sample, y = Superclass2,
+             fill = mean_scaled_cpm_superclass2)) +
+  geom_tile(color= "white",size=0.1) + 
+  scale_fill_viridis(name="mean_scaled_cpm_superclass2",option ="H") +
+  facet_grid(~cluster, scales = "free") +
+  theme(axis.text.x = element_text(angle = 90,
+                                   vjust = 1,
+                                   hjust = 1,
+                                   size = 5))
+
+dev.off()
+#####
+
+
+
+```
+
+# ===================
+# microbial contributor
+# ===================
+```{r}
+#check how many species
+
+path_cluster %>%
+  filter(!is.na(cluster)) %>%
+  group_by(Species) %>%
+  summarise(n = n()) #47
+
+nb.47.col <- distinctColorPalette(47)
+
+# plot
+
+pdf(file ="/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output/path_contributor.pdf", height=10, width=25)
+
+path_cluster %>%
+  filter(!is.na(cluster)) %>%
+  group_by(cluster) %>%
+  pivot_longer(-c(1,41:52), 
+               names_to = "Sample", values_to = "path_cpm") %>%
+  ggplot() +
+  geom_bar(aes(x = Sample, y = path_cpm, fill = Species), 
+           position = "fill",
+           stat = "identity") + #stat='identity', which is basically telling ggplot2 you will provide the y-values for the barplot, rather than counting the aggregate number of rows for each x value, which is the default stat=count
+  scale_fill_manual(values = nb.47.col) +
+  ylab("Pathway rel.abundance") +
+  xlab("SampleID") +
+  facet_grid(~cluster) +
+  coord_flip()
+
+dev.off()
+
+## color funciton?
+
+pdf(file ="/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output/path_superclass2_regardlessSample.pdf", height=10, width=25)
+
+path_cluster %>%
+  filter(!is.na(cluster)) %>%
+  group_by(cluster) %>%
+  pivot_longer(-c(1,41:52), 
+               names_to = "Sample", values_to = "path_cpm") %>%
+  ggplot() +
+  geom_bar(aes(x = Superclass2, y = path_cpm, fill = Species), 
+           position = "fill",
+           stat = "identity") + #stat='identity', which is basically telling ggplot2 you will provide the y-values for the barplot, rather than counting the aggregate number of rows for each x value, which is the default stat=count
+  scale_fill_manual(values = nb.47.col) +
+  #ylab() +
+  #xlab() +
+  facet_grid(~cluster) +
+  coord_flip()
+
+dev.off()
+```
+
+## as above, but see if the functions grouped based on PAM 6 cluster
+```{r}
+# import PAM table
+PAM_6 <- read_csv("/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/Rtable/PAM_6_cluster.csv")
+
+
+## plot
+
+pdf(file ="/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output/path_superclass2_PAMcluster_2.pdf", height=10, width=25)
+
+path_cluster %>%
+  filter(!is.na(cluster)) %>%
+  group_by(cluster) %>%
+  pivot_longer(-c(1,41:52), 
+               names_to = "SampleID", values_to = "path_cpm") %>%
+  left_join(PAM_6, by = "SampleID") %>%
+  ggplot() +
+  geom_bar(aes(x = Superclass2, y = path_cpm, fill = Species), 
+           position = "stack",
+           # position = "fill"
+           stat = "identity") + #stat='identity', which is basically telling ggplot2 you will provide the y-values for the barplot, rather than counting the aggregate number of rows for each x value, which is the default stat=count
+  scale_fill_manual(values = nb.47.col) +
+  #ylab() +
+  #xlab() +
+  facet_grid(~PAM_name, scales = "free") +
+  coord_flip()
+
+dev.off()
+
+
+
+```
+
+## compare functions between clusters
+```{r}
+# count pathway
+path_cluster %>%
+  #group_by(pathway) %>% #343
+  group_by(Superclass2) %>% #42
+  summarise(n =n()) 
+
+# organize 
+path_cluster_plot <- path_cluster %>%
+  filter(!is.na(cluster)) %>%
+  group_by(cluster) %>%
+  pivot_longer(-c(1,41:52), 
+               names_to = "SampleID", values_to = "path_cpm") %>%
+  left_join(PAM_6, by = "SampleID")
+
+# plot
+pdf(file ="/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output/path_superclass2_PAMcluster_cp1.pdf", height=20, width=30) 
+
+ggplot(path_cluster_plot,aes(x = pathway, y= path_cpm, 
+             fill=PAM_name, group = PAM_name)) +
+  #geom_bar(position = position_dodge2(preserve = "single"),
+   #      stat = "identity", width = 1) +
+  geom_bar(position = "dodge",stat = "identity", width = 0.2) +
+  geom_point(aes(fill = PAM_name, color = PAM_name, group = PAM_name),
+             alpha = 0.4,
+             size=2, 
+             position=position_jitterdodge(jitter.width = .1, 
+                                           dodge.width = 0.2)) +
+  theme_bw() +
+  scale_fill_manual(values=c("#999999", "#E69F00", "#56B4E9")) +
+  scale_color_manual(values=c("#464646", "#c38452", "#68a0b4")) +
+  #ylab() +
+  #xlab() +
+  facet_wrap_paginate(~Superclass2, scales = "free",
+                      ncol = 4, nrow = 4, page = 1) +
+  theme(axis.text.x = element_text(angle = 45, 
+                                   hjust=1,
+                                   size = 5)) +
+  coord_flip()
+
+dev.off()
+
+
+
+#### *****
+
+pdf(file ="/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output/path_superclass2_PAMcluster_test.pdf", height=40, width=20) 
+
+
+ggplot(path_cluster_plot,aes(x = pathway, y= path_cpm, 
+             fill=PAM_name, group = PAM_name)) +
+  #geom_bar(position = position_dodge2(preserve = "single"),
+   #      stat = "identity", width = 1) +
+  geom_bar(position = "dodge",stat = "identity", width = 0.6) +
+  geom_point(aes(fill = PAM_name, color = PAM_name, group = PAM_name),
+             alpha = 0.4,
+             size=2, 
+             position=position_jitterdodge(jitter.width = .1, 
+                                           dodge.width = 0.6)) +
+  theme_bw() +
+  scale_fill_manual(values=c("#999999", "#E69F00", "#56B4E9")) +
+  scale_color_manual(values=c("#464646", "#c38452", "#68a0b4")) +
+  facet_col(~Superclass2, scales = 'free', space = 'free') +
+  #facet_grid_paginate(Superclass2~., 
+   #                   scales = "free_x",
+    #                  space = "free",
+     #                 ncol = 4, nrow = 4, page = 1) +
+  coord_flip()
+
+
+
+dev.off()
+
+
+```
+
+
+## stool color based on the PAM clustering
+# 2022.09.14
+```{r}
+
+pdf(file ="/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/BS5_shotgun_20220531/R_output/stool_color_PAMcluster.pdf", height=3, width=10)
+
+meta[,c(1,23)] %>%
+   filter(SampleID %in% rownames(sample_data(ps))) %>% # only those sequenced
+  left_join(PAM_6, by = "SampleID") %>%
+   ggplot(aes(x = SampleID, y = color_of_stool,
+              col = factor(color_of_stool))) +
+   geom_point(size = 4)+
+   scale_color_manual(values = c("Bright Yellow" = "#FFFF00",
+                               "Brown" = "#9c6137",
+                               "Camo Green" = "#818905",
+                               "Golden Yellow" = "#fcc201",
+                               "Mustard Yellow" = "#e1ad01",
+                               "Orange" = "#ff8303",
+                               "Peanut Butter Brown" = "#cd9141",
+                               "no_fill" = "black")) +
+  facet_grid(~PAM_name) + 
+   theme_bw() +
+   theme(axis.text.x = element_text(angle = 45,
+                                   vjust = 1,
+                                   hjust = 1),
+        text = element_text(size=8))
+
+dev.off()
+```
