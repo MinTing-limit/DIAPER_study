@@ -1,0 +1,427 @@
+---
+title: "DIAPER_PAMcluster"
+author: "Min-Ting"
+date: "2022-09-07"
+output: html_document
+---
+#Save the entire list of environments objects
+```{r}
+# save
+save.image(file = "DIAPER_PAMcluster.RData")
+dir("/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all")
+
+#load environment
+load("/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/DIAPER_PAMcluster.RData")
+```
+
+# =========================================
+# load packages
+# =========================================
+```{r}
+library(genefilter)
+library(ggpubr)
+library(UpSetR)
+library(randomcoloR)
+library(circlize)
+library(RColorBrewer)
+library(qiime2R)
+library(tidyverse)
+library(phyloseq)
+library(DESeq2)
+library(ggplot2)
+library(ComplexHeatmap)
+library(curatedMetagenomicData)
+library(ggsci)
+library(Polychrome)
+library(OTUtable)
+library(vegan)
+library(ggforce)
+library(randomcoloR)
+
+# Enterotype (PAM clustering)
+library(cluster)
+library(clusterSim)
+library(ade4)
+```
+
+##=========================================================
+# Create funciton for converting Metaphlan file to phyloseq
+##=========================================================
+```{r}
+## make function based on
+# https://www.biostars.org/p/449688/
+metaphlanToPhyloseq <- function(
+  tax,
+  metadat=NULL,
+  simplenames=TRUE,
+  roundtointeger=FALSE,
+  split="|"){
+  ## tax is a matrix or data.frame with the table of taxonomic abundances, rows are taxa, columns are samples
+  ## metadat is an optional data.frame of specimen metadata, rows are samples, columns are variables
+  ## if simplenames=TRUE, use only the most detailed level of taxa names in the final object
+  ## if roundtointeger=TRUE, values will be rounded to the nearest integer
+  xnames = rownames(tax)
+  shortnames = gsub(paste0(".+\\", split), "", xnames)
+  if(simplenames){
+    rownames(tax) = shortnames
+  }
+  if(roundtointeger){
+    tax = round(tax * 1e4)
+  }
+  x2 = strsplit(xnames, split=split, fixed=TRUE)
+  taxmat = matrix(NA, ncol=max(sapply(x2, length)), nrow=length(x2))
+  colnames(taxmat) = c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species", "Strain")[1:ncol(taxmat)]
+  rownames(taxmat) = rownames(tax)
+  for (i in 1:nrow(taxmat)){
+    taxmat[i, 1:length(x2[[i]])] <- x2[[i]]
+  }
+  taxmat = gsub("[a-z]__", "", taxmat)
+  taxmat = phyloseq::tax_table(taxmat)
+  otutab = phyloseq::otu_table(tax, taxa_are_rows=TRUE)
+  if(is.null(metadat)){
+    res = phyloseq::phyloseq(taxmat, otutab)
+  }else{
+    res = phyloseq::phyloseq(taxmat, otutab, phyloseq::sample_data(metadat))
+  }
+  return(res)
+}
+```
+
+
+# =========================================
+# first organize data to genus level
+# use the one WITHOUT BS8
+# =========================================
+```{r}
+mpa4 <- read_csv("/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/metaphlan4_BS45710_merged.abund_09.07.22.csv")
+
+# make phyloseq 
+mpa4_ps <- mpa4 %>%
+  column_to_rownames(var = "taxonomy") # move taxonomy to rowname
+
+## import metadata
+meta_noBS8 <- read_csv("/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/DIAPER_metadata_noBS8_20220907.csv")
+
+meta_df <- as.data.frame(meta_noBS8)
+
+row.names(meta_df) <- meta_df$SampleID
+sample <- sample_data(meta_df)
+
+
+
+## convert mpa to phyloseq
+ps = metaphlanToPhyloseq(mpa4_ps, metadat = sample)
+
+```
+
+# =========================================
+# make a clean genus table
+# =========================================
+```{r}
+ps_genus <- ps %>%
+  tax_glom(taxrank =  "Genus",
+           NArm = FALSE) %>%
+  transform_sample_counts(function(x) {x/sum(x)}) %>%
+  psmelt() %>%
+  #filter(Abundance > 0.01) %>%
+  # Filter out low abundance taxa
+  arrange(Genus)   # Sort data frame alphabetically by species
+
+ps_genus_noNa <- ps %>%
+  tax_glom(taxrank =  "Genus",
+           NArm = TRUE) %>%
+  transform_sample_counts(function(x) {x/sum(x)}) %>%
+  psmelt() %>%
+  #filter(Abundance > 0.01) %>%
+  # Filter out low abundance taxa
+  arrange(Genus)   # Sort data frame alphabetically by species
+
+# replace NA with uncharacterized
+ps_genus[["Genus"]][is.na(ps_genus[["Genus"]])] <- "Uncharacterized"
+
+# from below the uncharacterized genus is not very different across samples,
+ps_genus[,c(3,4,5,53:58)] %>%
+  filter(Genus == "Uncharacterized") %>%
+  ggplot(aes(x = SampleID, y = Abundance, fill = Family)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(.~Baby_id, scales = "free")
+
+genus_table <- ps_genus_noNa[,c(3,4,58)] %>%
+  pivot_wider(names_from = "SampleID", values_from = "Abundance")
+
+genus_table <- genus_table %>%
+  column_to_rownames(var = "Genus")
+```
+
+##=========================================================
+# Calculate PAM for clustering 
+##=========================================================
+```{r}
+## JSD funciton
+dist.JSD <- function(inMatrix, pseudocount=0.000001, ...) {
+  KLD <- function(x,y) sum(x *log(x/y))
+  JSD<- function(x,y) sqrt(0.5 * KLD(x, (x+y)/2) + 0.5 * KLD(y, (x+y)/2))
+  matrixColSize <- length(colnames(inMatrix))
+  matrixRowSize <- length(rownames(inMatrix))
+  colnames <- colnames(inMatrix)
+  resultsMatrix <- matrix(0, matrixColSize, matrixColSize)
+  
+  inMatrix = apply(inMatrix,1:2,function(x) ifelse (x==0,pseudocount,x))
+  
+  for(i in 1:matrixColSize) {
+    for(j in 1:matrixColSize) { 
+      resultsMatrix[i,j]=JSD(as.vector(inMatrix[,i]),
+                             as.vector(inMatrix[,j]))
+    }
+  }
+  colnames -> colnames(resultsMatrix) -> rownames(resultsMatrix)
+  as.dist(resultsMatrix)->resultsMatrix
+  attr(resultsMatrix, "method") <- "dist"
+  return(resultsMatrix) 
+}
+
+
+## PAM
+pam.clustering=function(x,k) { # x is a distance matrix and k the number of clusters
+  require(cluster)
+  cluster = as.vector(pam(as.dist(x), k, diss=TRUE)$clustering)
+  return(cluster)
+}
+
+# A test run on our dataset with k=3 clusters as an example, before determining the optimal number of cluster (see section below) :
+data.cluster=pam.clustering(data.dist, k=3)
+
+
+
+require(clusterSim)
+nclusters = index.G1(t(genus_table), data.cluster, d = data.dist, centrotypes = "medoids")
+
+#We need to evaluate the CH index for every number of clusters k, and here is example code to do it (and plot the result):
+
+nclusters=NULL
+
+for (k in 1:10) { 
+  if (k==1) {
+    nclusters[k]=NA 
+  } else {
+    data.cluster_temp=pam.clustering(data.dist, k)
+    nclusters[k]=index.G1(t(genus_table),data.cluster_temp,  d = data.dist,
+                          centrotypes = "medoids")
+  }
+}
+
+pdf(file = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/Rplot/PAM_CHindex.pdf", width = 4, height = 3)
+
+plot(nclusters, type="h", xlab="k clusters", ylab="CH index",main="Optimal number of clusters") # looks like 2 or 5,6, but 6 seems to be the best..?
+dev.off()
+
+
+## *****
+
+# based on above... 6 clusters
+data.cluster=pam.clustering(data.dist, k=6)
+
+## ***** table
+
+cluster_table = data.frame(row.names = colnames(genus_table),
+                           Cluster = data.cluster)
+
+write.table(cluster_table,"/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/Rtable/PAM_6_cluster.txt",row.names = T,quote = F,sep = "\t")
+
+### cluster validation
+obs.silhouette=mean(silhouette(data.cluster, data.dist)[,3])
+cat(obs.silhouette) #0.433616 for 6 cluster; 0.4719968 for 3
+
+#A sample which is much closer to its own cluster than to any other cluster has a high S(i) value, while S(i) close to 0 implies that the given sample lies somewhere between two clusters. Large negative S(i) values indicate that the sample was assigned to the wrong cluster.
+
+
+
+
+## Between-class analysis (BCA)
+# remove noise
+ noise.removal <- function(dataframe, percent=0.01, top=NULL){
+	dataframe->Matrix
+	bigones <- rowSums(Matrix)*100/(sum(rowSums(Matrix))) > percent 
+	Matrix_1 <- Matrix[bigones,]
+	print(percent)
+	return(Matrix_1)
+ }
+ 
+ data.denoized=noise.removal(genus_table, percent=0.01)
+ 
+ #Finally, we can perform the between-class analysis and plot the result using the s.class() function
+ 
+pdf(file = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/Rplot/PAM_6_BCA.pdf", width = 7, height = 7)
+
+
+obs.pca=dudi.pca(data.frame(t(data.denoized)), scannf=F, nf=10)
+obs.bet=bca(obs.pca, fac=as.factor(data.cluster), scannf=F, nf=k-1) 
+s.class(obs.bet$ls, 
+        fac=as.factor(data.cluster),
+        col = c("#afddd5", "#ffa700", "#ffcccd","#f56093","#64864a",
+                "#c6b598"),
+        #col = c("#3db7e4", "#ff8849", "#69be28"),
+        grid=F,sub="Between-class analysis")
+
+
+dev.off()
+
+# 
+pdf(file = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/Rplot/PAM_6_PCA.pdf", width = 7, height = 7)
+
+obs.pcoa=dudi.pco(data.dist, scannf=F, nf=3)
+s.class(obs.pcoa$li, 
+        fac=as.factor(data.cluster), 
+        grid=F,
+        col = c("#afddd5", "#ffa700", "#ffcccd","#f56093","#64864a",
+                "#c6b598"),
+        #col = c("#3db7e4", "#ff8849", "#69be28"),
+        sub="Principal coordiante analysis")
+
+dev.off()
+```
+
+##=========================================================
+# see the abundance of each cluster
+##=========================================================
+```{r}
+cluster_table2 <- cluster_table %>%
+  rownames_to_column(var = "SampleID")
+
+
+## plot- 6 cluster 
+p_genus_noStat <- t(data.denoized) %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "SampleID") %>%
+  left_join(cluster_table2) %>%
+  pivot_longer(-c(SampleID, Cluster), names_to = "Genus", values_to = "Abundance") %>%
+  ggplot(aes(y=Abundance,x= as.factor(Cluster), fill=as.factor(Cluster))) +
+  geom_boxplot() +
+  geom_boxplot(outlier.shape = NA) +
+  theme_bw() +
+  theme(legend.position="right") +
+  geom_jitter(alpha = .2, colour = "black", fill = "white") +
+  scale_fill_manual(values= c("#afddd5", "#ffa700", 
+                              "#ffcccd","#f56093","#64864a",
+                              "#c6b598")) +
+  facet_wrap_paginate(~Genus, scales = "free",
+                      ncol = 4, nrow = 4, page = 1) +
+  scale_y_continuous(limits = c(NA, NA),
+                     expand = expansion(mult = c(0.1, 0.1)))
+
+
+
+
+## output
+pdf(file = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/Rplot/PAM_genus_clu6_p1_noStat.pdf", width = 10, height = 10)
+
+p_genus_noStat
+
+dev.off()
+```
+
+##=========================================================
+# Cluster transition over time
+##=========================================================
+```{r}
+## 6 clusters
+cluster_table2.2 <- cluster_table2 %>%
+  left_join(meta_df[,c(1,2)]) %>%
+  mutate(cluster_name = case_when(grepl("1", Cluster) ~ "cluster_1",
+                             grepl("2", Cluster) ~ "cluster_2",
+                             grepl("3", Cluster) ~ "cluster_3",
+                             grepl("4", Cluster) ~ "cluster_4",
+                             grepl("5", Cluster) ~ "cluster_5",
+                             grepl("6", Cluster) ~ "cluster_6"))
+
+
+
+## 6 clusters- plot
+
+pdf(file = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/Rplot/PAM_genus_clu6_time.pdf", width = 10, height = 4)
+
+cluster_table2.2 %>%
+  ggplot(aes(x = SampleID, y = cluster_name, 
+             color = cluster_name, group=1)) +
+  geom_point(size = 2)+
+  scale_color_manual(values = c("#afddd5", "#ffa700", 
+                              "#ffcccd","#f56093","#64864a",
+                              "#c6b598")) +
+  geom_line(color= 'grey')+
+  scale_y_discrete(expand=c(0.3, 0))+
+  xlab('SampleID') +
+  theme_grey()+
+  theme(axis.text.x = 
+          element_text(angle = 45, vjust = 1, hjust = 1,
+                       size = 2))+
+  facet_wrap(~Baby_id, nrow = 1,  scales = "free_x")
+
+dev.off()
+
+
+```
+
+##=========================================================
+# Genus in cluster-stack bar plot
+##=========================================================
+```{r}
+# see data.denoised ==> 26 genera left
+
+# prune out genus below 1% in each sample
+
+ps_genus_noNa2 <- ps %>%
+  tax_glom(taxrank =  "Genus",
+           NArm = TRUE) %>%
+  transform_sample_counts(function(x) {x/sum(x)}) %>%
+  psmelt() %>%
+  filter(Abundance > 0.01) %>%
+  # Filter out low abundance taxa
+  arrange(Genus)   # Sort data frame alphabetically by species
+
+
+##  6 clusters
+
+nb.26.col <- distinctColorPalette(26)
+
+pdf(file = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/Rplot/PAM_stackGenus_clu6.pdf", width = 10, height = 5)
+
+ps_genus_noNa2 %>%
+  left_join(cluster_table2.2) %>%
+  group_by(SampleID) %>%
+  mutate(sum = sum(Abundance)) %>%
+  group_by(SampleID) %>%
+  mutate(new.abund = Abundance/sum*100) %>%
+  ggplot( aes(x=SampleID, y=new.abund, fill= OTU)) +
+  geom_bar(position="stack", stat="identity") +
+  scale_fill_manual(values = nb.26.col) +
+  facet_grid(~cluster_name, scales = "free_x", space = "free_x") +
+  theme (axis.text.x = element_text(size = 2,vjust = 1, hjust = 1,
+                                    angle = 45))
+
+dev.off()
+
+
+##  6 clusters- facet baby
+
+pdf(file = "/Users/min-tinglee/Desktop/Diet_Lipid_Data/DIAPER/1_DIAPER_all/Rplot/PAM_stackGenus_clu6_baby.pdf", width = 15, height = 8)
+
+ps_genus_noNa2 %>%
+  left_join(cluster_table2.2) %>%
+  group_by(SampleID) %>%
+  mutate(sum = sum(Abundance)) %>%
+  group_by(SampleID) %>%
+  mutate(new.abund = Abundance/sum*100) %>%
+  ggplot( aes(x=SampleID, y=new.abund, fill= OTU)) +
+  geom_bar(position="stack", stat="identity") +
+  scale_fill_manual(values = nb.26.col) +
+  facet_grid(Baby_id ~ cluster_name,
+             scales = "free", space = "free") +
+  #facet_wrap(~ Baby_id+cluster_name, scales = "free") +
+  theme (axis.text.x = element_text(size = 2,vjust = 1, hjust = 1,
+                                    angle = 45))
+
+dev.off()
+
+```
+
+
