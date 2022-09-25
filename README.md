@@ -1,4 +1,5 @@
 # DIAPER_study
 
-## Rmd files
->`DIAPER_combined.baby.Rmd`:  this file is constantly changed once getting new subjects NGS and APP data.
+## Rmd files: constantly changed once getting new subjects NGS and APP data.
+>`DIAPER_combined.baby.Rmd`
+>'DIAPER_PAMcluster.Rmd': Enterotype analysis using PAM modeling. 
