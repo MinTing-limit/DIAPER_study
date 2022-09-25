@@ -6,3 +6,5 @@
 (2) Incorporate targeted metabolomics data (chol-sulf).
 
 >`DIAPER_PAMcluster.Rmd`: Enterotype analysis using PAM modeling. 
+
+>`BS5_shotgun_20220601.Rmd`: baby#5 analysis.
